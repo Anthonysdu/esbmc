@@ -30,7 +30,7 @@ extern "C"
 #include <goto-programs/goto_convert_functions.h>
 #include <goto-programs/goto_inline.h>
 #include <goto-programs/goto_k_induction.h>
-#include <goto-programs/interval_analysis.h>
+#include <goto-programs/abstract-interpretation/interval_analysis.h>
 #include <goto-programs/loop_numbers.h>
 #include <goto-programs/read_goto_binary.h>
 #include <goto-programs/write_goto_binary.h>
@@ -339,7 +339,8 @@ void esbmc_parseoptionst::get_command_line_options(optionst &options)
     options.set_option("partial-loops", false);
   }
 
-  if(cmdline.isset("overflow-check"))
+  if(
+    cmdline.isset("overflow-check") || cmdline.isset("unsigned-overflow-check"))
   {
     options.set_option("disable-inductive-step", true);
   }
@@ -404,6 +405,21 @@ void esbmc_parseoptionst::get_command_line_options(optionst &options)
     }
   }
 #endif
+
+  // parallel solving activates "--multi-property"
+  if(cmdline.isset("parallel-solving"))
+  {
+    options.set_option("result-only", true);
+    options.set_option("base-case", true);
+    options.set_option("multi-property", true);
+  }
+
+  // If multi-property is on, we should set result-only and base-case
+  if(cmdline.isset("multi-property"))
+  {
+    options.set_option("result-only", true);
+    options.set_option("base-case", true);
+  }
 
   config.options = options;
 }
@@ -788,7 +804,7 @@ int esbmc_parseoptionst::doit_k_induction_parallel()
       // and haven't crashed (if it crashed, bc_solution will be UINT_MAX
       if(bc_finished && (bc_solution != max_k_step))
       {
-        log_result(
+        log_success(
           "\nSolution found by the forward condition; "
           "all states are reachable (k = {:d})\n"
           "VERIFICATION SUCCESSFUL",
@@ -804,7 +820,7 @@ int esbmc_parseoptionst::doit_k_induction_parallel()
       // and haven't crashed (if it crashed, bc_solution will be UINT_MAX
       if(bc_finished && (bc_solution != max_k_step))
       {
-        log_result(
+        log_success(
           "\nSolution found by the inductive step "
           "(k = {:d})\n"
           "VERIFICATION SUCCESSFUL",
@@ -814,7 +830,7 @@ int esbmc_parseoptionst::doit_k_induction_parallel()
     }
 
     // Couldn't find a bug or a proof for the current deepth
-    log_result("\nVERIFICATION UNKNOWN");
+    log_fail("\nVERIFICATION UNKNOWN");
     return false;
   }
 
@@ -1105,7 +1121,7 @@ int esbmc_parseoptionst::doit_k_induction()
   }
 
   log_status("Unable to prove or falsify the program, giving up.");
-  log_status("VERIFICATION UNKNOWN");
+  log_fail("VERIFICATION UNKNOWN");
 
   return 0;
 }
@@ -1143,7 +1159,7 @@ int esbmc_parseoptionst::doit_falsification()
   }
 
   log_status("Unable to prove or falsify the program, giving up.");
-  log_status("VERIFICATION UNKNOWN");
+  log_fail("VERIFICATION UNKNOWN");
 
   return 0;
 }
@@ -1185,7 +1201,7 @@ int esbmc_parseoptionst::doit_incremental()
   }
 
   log_status("Unable to prove or falsify the program, giving up.");
-  log_status("VERIFICATION UNKNOWN");
+  log_fail("VERIFICATION UNKNOWN");
 
   return 0;
 }
@@ -1228,7 +1244,7 @@ int esbmc_parseoptionst::doit_termination()
   }
 
   log_status("Unable to prove or falsify the program, giving up.");
-  log_status("VERIFICATION UNKNOWN");
+  log_fail("VERIFICATION UNKNOWN");
 
   return 0;
 }
@@ -1295,7 +1311,7 @@ int esbmc_parseoptionst::do_forward_condition(
 
   bmc.options.set_option("unwind", integer2string(k_step));
 
-  log_status("Checking forward condition, k = {:d}", k_step);
+  log_progress("Checking forward condition, k = {:d}", k_step);
   auto res = do_bmc(bmc);
 
   // Restore the no assertion flag, before checking the other steps
@@ -1316,7 +1332,7 @@ int esbmc_parseoptionst::do_forward_condition(
     return false;
 
   default:
-    log_result("Unknown BMC result");
+    log_fail("Unknown BMC result");
     abort();
   }
 
@@ -1350,7 +1366,7 @@ int esbmc_parseoptionst::do_inductive_step(
   bmct bmc(goto_functions, opts, context);
   bmc.options.set_option("unwind", integer2string(k_step));
 
-  log_status("Checking inductive step, k = {:d}", k_step);
+  log_progress("Checking inductive step, k = {:d}", k_step);
   switch(do_bmc(bmc))
   {
   case smt_convt::P_SATISFIABLE:
@@ -1366,7 +1382,7 @@ int esbmc_parseoptionst::do_inductive_step(
     return false;
 
   default:
-    log_result("Unknown BMC result\n");
+    log_fail("Unknown BMC result\n");
     abort();
   }
 
@@ -1420,7 +1436,7 @@ bool esbmc_parseoptionst::get_goto_program(
     // If the user is providing the GOTO functions, we don't need to parse
     if(cmdline.isset("binary"))
     {
-      log_status("Reading GOTO program from file");
+      log_progress("Reading GOTO program from file");
 
       if(read_goto_binary(goto_functions))
         return true;
@@ -1461,7 +1477,7 @@ bool esbmc_parseoptionst::get_goto_program(
           return true;
       }
 
-      log_status("Generating GOTO Program");
+      log_progress("Generating GOTO Program");
 
       goto_convert(context, options, goto_functions);
     }
@@ -1577,7 +1593,7 @@ bool esbmc_parseoptionst::process_goto_program(
 
     if(cmdline.isset("interval-analysis") || cmdline.isset("goto-contractor"))
     {
-      interval_analysis(goto_functions, ns);
+      interval_analysis(goto_functions, ns, options);
     }
 
     if(
@@ -1594,7 +1610,8 @@ bool esbmc_parseoptionst::process_goto_program(
 #else
       log_error(
         "Current build does not support contractors. If ibex is installed, add "
-        "-DENABLE_IBEX = ON");
+        "to your build process "
+        "-DENABLE_GOTO_CONTRACTOR=ON -DIBEX_DIR=path-to-ibex");
       abort();
 #endif
     }
@@ -1715,7 +1732,7 @@ bool esbmc_parseoptionst::process_goto_program(
 int esbmc_parseoptionst::do_bmc(bmct &bmc)
 { // do actual BMC
 
-  log_status("Starting Bounded Model Checking");
+  log_progress("Starting Bounded Model Checking");
 
   smt_convt::resultt res = bmc.start_bmc();
   if(res == smt_convt::P_ERROR)

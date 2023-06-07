@@ -26,7 +26,8 @@ solidity_convertert::solidity_convertert(
     current_scope_var_num(1),
     current_functionDecl(nullptr),
     current_forStmt(nullptr),
-    current_functionName("")
+    current_functionName(""),
+    current_contractName("")
 {
   std::ifstream in(_contract_path);
   contract_contents.assign(
@@ -292,6 +293,13 @@ bool solidity_convertert::get_var_decl(
                                     SolidityGrammar::Literal;
     if(expr_is_literal || (expr_is_un_op && subexpr_is_literal))
       int_literal_type = ast_node["typeDescriptions"];
+    else if(
+      init_value["isInlineArray"] != nullptr && init_value["isInlineArray"])
+    {
+      // TODO: make a function to convert inline array initialisation to index access assignment.
+      int_literal_type =
+        make_array_elementary_type(init_value["typeDescriptions"]);
+    }
 
     exprt val;
     if(get_expr(init_value, int_literal_type, val))
@@ -598,7 +606,7 @@ bool solidity_convertert::get_function_params(
   bool is_array = SolidityGrammar::get_type_name_t(pd["typeDescriptions"]);
   if(is_array)
   {
-    assert(!"Unimplemented - funciton parameter is array type");
+    assert(!"Unimplemented - function parameter is array type");
   }
 
   // 3a. get id and name
@@ -767,12 +775,25 @@ bool solidity_convertert::get_statement(
     // TODO: Fix me! Assumptions:
     //  a). It's "return <expr>;" not "return;"
     //  b). <expr> is pointing to a DeclRefExpr, we need to wrap it in an ImplicitCastExpr as a subexpr
+    //  c). For multiple return type, the return statement represented as a tuple expression using a components field.
+    //      Besides, tuple can only be declared literally. https://docs.soliditylang.org/en/latest/control-structures.html#assignment
+    //      e.g. return (false, 123)
     assert(stmt.contains("expression"));
 
     typet return_type;
+    assert(
+      (*current_functionDecl)["returnParameters"]["id"].get<std::uint16_t>() ==
+      stmt["functionReturnParameters"].get<std::uint16_t>());
     if(get_type_description(
-         stmt["expression"]["typeDescriptions"], return_type))
+         (*current_functionDecl)["returnParameters"], return_type))
       return true;
+
+    nlohmann::json int_literal_type = nullptr;
+
+    auto expr_type = SolidityGrammar::get_expression_t(stmt["expression"]);
+    bool expr_is_literal = expr_type == SolidityGrammar::Literal;
+    if(expr_is_literal)
+      int_literal_type = make_return_type_from_typet(return_type);
 
     // 2. get return value
     code_returnt ret_expr;
@@ -798,8 +819,7 @@ bool solidity_convertert::get_statement(
     */
 
     exprt val;
-    if(get_expr(
-         implicit_cast_expr, stmt["expression"]["typeDescriptions"], val))
+    if(get_expr(implicit_cast_expr, int_literal_type, val))
       return true;
 
     solidity_gen_typecast(ns, val, return_type);
@@ -1075,7 +1095,7 @@ bool solidity_convertert::get_expr(
     // now, and check its subexpression
     for(const auto &arg : expr["components"].items())
     {
-      if(get_expr(arg.value(), new_expr))
+      if(get_expr(arg.value(), int_literal_type, new_expr))
         return true;
     }
     break;
@@ -1181,10 +1201,20 @@ bool solidity_convertert::get_expr(
     assert(expr.contains("expression"));
     const nlohmann::json &callee_expr_json = expr["expression"];
 
-    // obtain type info from symbol table
+    // Function symbol id is c:@C@referenced_function_contract_name@F@function_name#referenced_function_id
+    // Using referencedDeclaration will point us to the original declared function. This works even for inherited function and overrided functions.
+
+    const int caller_id =
+      callee_expr_json["referencedDeclaration"].get<std::uint16_t>();
+    const nlohmann::json caller_expr_json = find_decl_ref(caller_id);
+    const int contract_id = caller_expr_json["scope"].get<std::uint16_t>();
+
+    std::string ref_contract_name;
+    get_contract_name(contract_id, ref_contract_name);
+
     std::string name, id;
-    name = callee_expr_json["memberName"];
-    id = name;
+    get_function_definition_name(caller_expr_json, name, id);
+
     if(context.find_symbol(id) == nullptr)
       return true;
 
@@ -1195,21 +1225,17 @@ bool solidity_convertert::get_expr(
     new_expr.identifier(id);
     new_expr.cmt_lvalue(true);
     new_expr.name(name);
+    new_expr.set("#member_name", prefix + ref_contract_name);
 
     // obtain the type of return value
-    // Need to "decrypt" the typeDescriptions and manually make a typeDescription
-    nlohmann::json callee_rtn_type =
-      make_callexpr_return_type(callee_expr_json["typeDescriptions"]);
+    // It can be retrieved directly from the original function declaration
     typet t;
-    if(get_type_description(callee_rtn_type, t))
+    if(get_type_description(caller_expr_json["returnParameters"], t))
       return true;
 
     side_effect_expr_function_callt call;
     call.function() = new_expr;
     call.type() = t;
-
-    const nlohmann::json caller_expr_json =
-      find_decl_ref(callee_expr_json["referencedDeclaration"]);
 
     // populate params
     auto param_nodes = caller_expr_json["parameters"]["parameters"];
@@ -1677,10 +1703,10 @@ bool solidity_convertert::get_cast_expr(
     if(get_type_description(adjusted_type, type))
       return true;
   }
+  // TODO: Maybe can just type = expr.type() for other types as well. Need to make sure types are all set in get_expr (many functions are called multiple times to perform the same action).
   else
   {
-    if(get_type_description(cast_expr["subExpr"]["typeDescriptions"], type))
-      return true;
+    type = expr.type();
   }
 
   // 3. get cast type and generate typecast
@@ -2222,7 +2248,7 @@ bool solidity_convertert::get_parameter_list(
       1); // TODO: Fix me! assuming one return parameter
     const nlohmann::json &rtn_type =
       type_name["parameters"].at(0)["typeName"]["typeDescriptions"];
-    return get_elementary_type_name(rtn_type, new_type);
+    return get_type_description(rtn_type, new_type);
 
     break;
   }
@@ -2280,11 +2306,15 @@ void solidity_convertert::get_function_definition_name(
   // Follow the way in clang:
   //  - For function name, just use the ast_node["name"]
   // assume Solidity AST json object has "name" field, otherwise throws an exception in nlohmann::json
+  std::string contract_name;
+  get_contract_name(ast_node["scope"], contract_name);
+
   if(ast_node["kind"].get<std::string>() == "constructor")
-    get_contract_name(ast_node["scope"], name);
+    name = contract_name;
   else
     name = ast_node["name"].get<std::string>();
-  id = name;
+  id = "c:@C@" + contract_name + "@F@" + name + "#" +
+       i2string(ast_node["id"].get<std::int16_t>());
 }
 
 unsigned int solidity_convertert::add_offset(
@@ -2637,20 +2667,32 @@ solidity_convertert::make_pointee_type(const nlohmann::json &sub_expr)
         sub_expr["typeString"].get<std::string>().find("returns") !=
         std::string::npos)
       {
+        adjusted_expr = R"(
+          {
+            "nodeType": "FunctionDefinition",
+            "parameters":
+              {
+                "parameters" : []
+              }
+          }
+        )"_json;
         // e.g. for typeString like:
         // "typeString": "function () returns (uint8)"
-        // TODO: currently we only assume one parameters
-        if(
-          sub_expr["typeString"].get<std::string>().find("returns (uint8)") !=
-          std::string::npos)
+        // use regex to capture the type and convert it to shorter form.
+        std::smatch matches;
+        std::regex e("returns \\((\\w+)\\)");
+        std::string typeString = sub_expr["typeString"].get<std::string>();
+        if(std::regex_search(typeString, matches, e))
         {
-          auto j2 = R"(
-              {
-                "typeIdentifier": "t_uint8",
-                "typeString": "uint8"
-              }
-            )"_json;
-          adjusted_expr["returnParameters"] = j2;
+          auto j2 = nlohmann::json::parse(
+            R"({
+              "typeIdentifier": "t_)" +
+            matches[1].str() + R"(",
+              "typeString": ")" +
+            matches[1].str() + R"("
+            })");
+          adjusted_expr["returnParameters"]["parameters"][0]
+                       ["typeDescriptions"] = j2;
         }
         else if(
           sub_expr["typeString"].get<std::string>().find("returns (contract") !=
@@ -2690,6 +2732,27 @@ solidity_convertert::make_pointee_type(const nlohmann::json &sub_expr)
   return adjusted_expr;
 }
 
+// Parse typet object into a typeDescriptions json
+nlohmann::json solidity_convertert::make_return_type_from_typet(typet type)
+{
+  // Useful to get the width of a int literal type for return statement
+  nlohmann::json adjusted_expr;
+  if(type.is_signedbv() || type.is_unsignedbv())
+  {
+    std::string width = type.width().as_string();
+    std::string type_name = (type.is_signedbv() ? "int" : "uint") + width;
+    auto j2 = nlohmann::json::parse(
+      R"({
+            "typeIdentifier": "t_)" +
+      type_name + R"(",
+            "typeString": ")" +
+      type_name + R"("
+          })");
+    adjusted_expr = j2;
+  }
+  return adjusted_expr;
+}
+
 nlohmann::json solidity_convertert::make_callexpr_return_type(
   const nlohmann::json &type_descrpt)
 {
@@ -2705,16 +2768,19 @@ nlohmann::json solidity_convertert::make_callexpr_return_type(
     {
       // e.g. for typeString like:
       // "typeString": "function () returns (uint8)"
-      if(
-        type_descrpt["typeString"].get<std::string>().find("returns (uint8)") !=
-        std::string::npos)
+      // use regex to capture the type and convert it to shorter form.
+      std::smatch matches;
+      std::regex e("returns \\((\\w+)\\)");
+      std::string typeString = type_descrpt["typeString"].get<std::string>();
+      if(std::regex_search(typeString, matches, e))
       {
-        auto j2 = R"(
-              {
-                "typeIdentifier": "t_uint8",
-                "typeString": "uint8"
-              }
-            )"_json;
+        auto j2 = nlohmann::json::parse(
+          R"({
+            "typeIdentifier": "t_)" +
+          matches[1].str() + R"(",
+            "typeString": ")" +
+          matches[1].str() + R"("
+          })");
         adjusted_expr = j2;
       }
       else if(

@@ -64,7 +64,7 @@ bool language_uit::parse(const std::string &filename)
   lf.language = mode_table[mode].new_language();
   languaget &language = *lf.language;
 
-  log_status("Parsing", filename);
+  log_progress("Parsing", filename);
 
 #ifdef ENABLE_SOLIDITY_FRONTEND
   if(mode == get_mode(language_idt::SOLIDITY))
@@ -96,7 +96,7 @@ bool language_uit::parse(const std::string &filename)
 
 bool language_uit::typecheck()
 {
-  log_status("Converting");
+  log_progress("Converting");
 
   if(language_files.typecheck(context))
   {

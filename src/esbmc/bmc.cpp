@@ -1,8 +1,13 @@
 #include <csignal>
+#include <memory>
 #include <sys/types.h>
+#include <algorithm>
+#include <thread>
+#include <chrono>
 
 #ifndef _WIN32
 #include <unistd.h>
+#include <sched.h>
 #else
 #include <windows.h>
 #include <winbase.h>
@@ -33,6 +38,8 @@
 #include <util/show_symbol_table.h>
 #include <util/time_stopping.h>
 #include <util/cache.h>
+#include <atomic>
+#include <goto-symex/witnesses.h>
 
 bmct::bmct(goto_functionst &funcs, optionst &opts, contextt &_context)
   : options(opts), context(_context), ns(context)
@@ -93,7 +100,7 @@ void bmct::successful_trace()
   if(witness_output != "")
   {
     goto_tracet goto_trace;
-    log_status("Building successful trace");
+    log_progress("Building successful trace");
     /* build_successful_goto_trace(eq, ns, goto_trace); */
     correctness_graphml_goto_trace(options, ns, goto_trace);
   }
@@ -106,7 +113,7 @@ void bmct::error_trace(
   if(options.get_bool_option("result-only"))
     return;
 
-  log_status("Building error trace");
+  log_progress("Building error trace");
 
   bool is_compact_trace = true;
   if(
@@ -128,13 +135,19 @@ void bmct::error_trace(
   if(witness_output != "")
     violation_graphml_goto_trace(options, ns, goto_trace);
 
+  if(options.get_bool_option("generate-testcase"))
+  {
+    generate_testcase_metadata();
+    generate_testcase("testcase.xml", eq, smt_conv);
+  }
+
   std::ostringstream oss;
-  oss << "\nCounterexample:\n";
+  log_fail("\n[Counterexample]\n");
   show_goto_trace(oss, ns, goto_trace);
   log_result("{}", oss.str());
 }
 
-smt_convt::resultt bmct::run_decision_procedure(
+void bmct::generate_smt_from_equation(
   std::shared_ptr<smt_convt> &smt_conv,
   std::shared_ptr<symex_target_equationt> &eq)
 {
@@ -154,9 +167,15 @@ smt_convt::resultt bmct::run_decision_procedure(
   fine_timet encode_start = current_time();
   do_cbmc(smt_conv, eq);
   fine_timet encode_stop = current_time();
-
   log_status(
     "Encoding to solver time: {}s", time2string(encode_stop - encode_start));
+}
+
+smt_convt::resultt bmct::run_decision_procedure(
+  std::shared_ptr<smt_convt> &smt_conv,
+  std::shared_ptr<symex_target_equationt> &eq)
+{
+  generate_smt_from_equation(smt_conv, eq);
 
   if(
     options.get_bool_option("smt-formula-too") ||
@@ -167,7 +186,7 @@ smt_convt::resultt bmct::run_decision_procedure(
       return smt_convt::P_SMTLIB;
   }
 
-  log_status("Solving with solver {}", smt_conv->solver_text());
+  log_progress("Solving with solver {}", smt_conv->solver_text());
 
   fine_timet sat_start = current_time();
   smt_convt::resultt dec_result = smt_conv->dec_solve();
@@ -182,12 +201,12 @@ smt_convt::resultt bmct::run_decision_procedure(
 
 void bmct::report_success()
 {
-  log_status("\nVERIFICATION SUCCESSFUL");
+  log_success("\nVERIFICATION SUCCESSFUL");
 }
 
 void bmct::report_failure()
 {
-  log_status("\nVERIFICATION FAILED");
+  log_fail("\nVERIFICATION FAILED");
 }
 
 void bmct::show_program(std::shared_ptr<symex_target_equationt> &eq)
@@ -284,6 +303,30 @@ void bmct::report_trace(
     break;
 
   default:
+    break;
+  }
+}
+
+void bmct::report_multi_property_trace(
+  smt_convt::resultt &res,
+  const std::string &msg)
+{
+  assert(options.get_bool_option("base-case"));
+
+  switch(res)
+  {
+  case smt_convt::P_UNSATISFIABLE:
+    // UNSAT means that the property was correct up to K
+    log_success("Claim '{}' holds up to the current K", msg);
+    break;
+
+  case smt_convt::P_SATISFIABLE:
+    // SAT means that we found a error!
+    log_fail("Claim '{}' fails", msg);
+    break;
+
+  default:
+    log_fail("Claim '{}' could not be solved", msg);
     break;
   }
 }
@@ -637,6 +680,11 @@ smt_convt::resultt bmct::run_thread(std::shared_ptr<symex_target_equationt> &eq)
         std::shared_ptr<smt_convt>(create_solver("", ns, options));
     }
 
+    if(
+      options.get_bool_option("multi-property") &&
+      options.get_bool_option("base-case"))
+      return multi_property_check(eq, result->remaining_claims);
+
     return run_decision_procedure(runtime_solver, eq);
   }
 
@@ -657,4 +705,154 @@ smt_convt::resultt bmct::run_thread(std::shared_ptr<symex_target_equationt> &eq)
     log_error("Out of memory\n");
     return smt_convt::P_ERROR;
   }
+}
+
+smt_convt::resultt bmct::multi_property_check(
+  std::shared_ptr<symex_target_equationt> &eq,
+  size_t remaining_claims)
+{
+  // As of now, it only makes sense to do this for the base-case
+  assert(
+    options.get_bool_option("base-case") &&
+    "Multi-property only supports base-case");
+
+  // Initial values
+  smt_convt::resultt final_result = smt_convt::P_UNSATISFIABLE;
+  std::atomic_size_t ce_counter = 0;
+  std::unordered_set<size_t> jobs;
+  std::mutex result_mutex;
+
+  // TODO: This is the place to check a cache
+  for(size_t i = 1; i <= remaining_claims; i++)
+    jobs.emplace(i);
+
+  /* This is a JOB that will:
+   * 1. Generate a solver instance for a specific claim (@parameter i)
+   * 2. Solve the instance
+   * 3. Generate a Counter-Example (or Witness)
+   *
+   * This job also affects the environment by using:
+   * - &ce_counter: for generating the Counter Example file name
+   * - &final_result: if the current instance is SAT, then we known that the current k contains a bug
+   * - &result_mutex: a mutex for step 3.
+   *
+   * Finally, this function is affected by the "multi-fail-fast" option, which makes this instance stop
+   * if final_result is set to SAT
+   */
+  auto job_function =
+    [this, &eq, &ce_counter, &final_result, &result_mutex](const size_t &i) {
+      // Since this is just a copy, we probably don't need a lock
+      auto local_eq = std::make_shared<symex_target_equationt>(*eq);
+
+    // Just to confirm that things are in parallel
+#ifndef _WIN32
+#ifndef __APPLE__ // sched_getcpu not supported in OS X
+      log_debug("Thread running on Core {}", sched_getcpu());
+#endif
+#endif
+      // Set up the current claim and slice it!
+      claim_slicer claim(i);
+      claim.run(local_eq->SSA_steps);
+      symex_slicet slicer(options);
+      slicer.run(local_eq->SSA_steps);
+
+      // Initialize a solver
+      auto runtime_solver =
+        std::shared_ptr<smt_convt>(create_solver("", ns, options));
+      // Save current instance
+      generate_smt_from_equation(runtime_solver, local_eq);
+
+      log_status(
+        "Solving claim {} with solver {}",
+        claim.claim_msg,
+        runtime_solver->solver_text());
+
+      smt_convt::resultt result;
+      /* TODO: We might move this into solver_convt. It is
+       * useful to have the solver as a thread.
+       */
+      std::thread solver_job(
+        [&result, &runtime_solver]() { result = runtime_solver->dec_solve(); });
+
+      const bool fail_fast = options.get_bool_option("multi-fail-fast");
+      // This loop is mainly for fail-fast.
+      try
+      {
+        while(!solver_job.joinable())
+        {
+          // Try again 100ms later
+          std::this_thread::sleep_for(
+            std::chrono::duration<int, std::milli>(100));
+          // Did someone finished already?
+          if(fail_fast && final_result == smt_convt::P_SATISFIABLE)
+          {
+            log_status("Other thread already found a SAT VCC.");
+            throw 0;
+          }
+        }
+        solver_job.join();
+        report_multi_property_trace(result, claim.claim_msg);
+        if(result == smt_convt::P_SATISFIABLE)
+        {
+          const std::lock_guard<std::mutex> lock(result_mutex);
+          // Check if someone else found the solution
+          if(fail_fast && final_result == smt_convt::P_SATISFIABLE)
+          {
+            log_status(
+              "Found solution for VCC. But, other thread found it first.");
+            throw 0;
+          }
+          goto_tracet goto_trace;
+          build_goto_trace(local_eq, runtime_solver, goto_trace, false);
+          // TODO: Replace this with a test-case for coverage!
+          std::string output_file = options.get_option("cex-output");
+          if(output_file != "")
+          {
+            std::ofstream out(fmt::format("{}-{}", output_file, ce_counter++));
+            show_goto_trace(out, ns, goto_trace);
+          }
+          std::ostringstream oss;
+          log_fail("\n[Counterexample]\n");
+          show_goto_trace(oss, ns, goto_trace);
+          log_result("{}", oss.str());
+          final_result = result;
+        }
+        // TODO: This is the place to store into a cache
+      }
+      catch(...)
+      {
+        log_debug("Failing Fast");
+      }
+    };
+
+  // PARALLEL
+  if(options.get_bool_option("parallel-solving"))
+  {
+    /* NOTE: I would love to use std::for_each here, but it is not giving
+       * the result I would expect. My guess is either compiler version
+       * or some magic flag that we are not using.
+       *
+       * Nevertheless, we can achieve the same results by just creating
+       * threads.
+       */
+
+    // TODO: Running everything in parallel might be a bad idea.
+    //       Should we also add a thread pool?
+    std::vector<std::thread> parallel_jobs;
+    for(const auto &i : jobs)
+      parallel_jobs.push_back(std::thread(job_function, i));
+
+    // Main driver
+    for(auto &t : parallel_jobs)
+    {
+      t.join();
+    }
+    // We could remove joined jobs from the parallel_jobs vector.
+    // However, its probably not worth for small vectors.
+  }
+  // SEQUENTIAL
+  else
+    std::for_each(std::begin(jobs), std::end(jobs), job_function);
+
+  return final_result;
 }

@@ -1,12 +1,19 @@
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
+#include <limits.h>
+#include <errno.h>
+
+#undef errno
+extern _Thread_local int errno;
 
 #undef exit
 #undef abort
 #undef calloc
+#undef getenv
 #undef atoi
 #undef atol
-#undef getenv
+#undef atoll
 
 typedef struct atexit_key
 {
@@ -83,21 +90,109 @@ __ESBMC_HIDE:;
   return res;
 }
 
-int atoi(const char *nptr)
+long int strtol(const char *str, char **endptr, int base)
 {
 __ESBMC_HIDE:;
-  int res;
-  /* XXX - does nothing without strabs */
-  return res;
+  long int result = 0;
+  int sign = 1;
+
+  // Handle whitespace
+  while(isspace(*str))
+    str++;
+
+  // Handle sign
+  if(*str == '-')
+  {
+    sign = -1;
+    str++;
+  }
+  else if(*str == '+')
+    str++;
+
+  // Handle base
+  if(base == 0)
+  {
+    if(*str == '0')
+    {
+      base = 8;
+      if(tolower(str[1]) == 'x')
+      {
+        base = 16;
+        str += 2;
+      }
+      else
+        str++;
+    }
+    else
+      base = 10;
+  }
+  else if(base == 16 && *str == '0' && tolower(str[1]) == 'x')
+    str += 2;
+
+  // Convert digits
+  while(isdigit(*str) || (base == 16 && isxdigit(*str)))
+  {
+    int digit = tolower(*str) - '0';
+    if(digit > 9)
+      digit -= 7;
+    if(result > (LONG_MAX - digit) / base)
+      return sign == -1 ? LONG_MIN : LONG_MAX;
+    result = result * base + digit;
+    str++;
+  }
+
+  // Set end pointer
+  if(endptr != NULL)
+    *endptr = (char *)str;
+
+  return sign * result;
 }
 
-long atol(const char *nptr)
-{
-__ESBMC_HIDE:;
-  long res;
-  /* XXX - does nothing without strabs */
-  return res;
-}
+/* one plus the numeric value, rest is zero */
+static const unsigned char ATOI_MAP[256] = {
+  ['0'] = 1,
+  ['1'] = 2,
+  ['2'] = 3,
+  ['3'] = 4,
+  ['4'] = 5,
+  ['5'] = 6,
+  ['6'] = 7,
+  ['7'] = 8,
+  ['8'] = 9,
+  ['9'] = 10,
+};
+
+#define ATOI_DEF(name, type, TYPE)                                             \
+  type name(const char *s)                                                     \
+  {                                                                            \
+  __ESBMC_HIDE:;                                                               \
+    while(isspace(*s))                                                         \
+      s++;                                                                     \
+    int neg = 0;                                                               \
+    if(*s == '-')                                                              \
+    {                                                                          \
+      neg = 1;                                                                 \
+      s++;                                                                     \
+    }                                                                          \
+    else if(*s == '+')                                                         \
+      s++;                                                                     \
+    unsigned type r = 0;                                                       \
+    for(unsigned char c; (c = ATOI_MAP[(unsigned char)*s]); s++)               \
+    {                                                                          \
+      c--;                                                                     \
+      if(r > (TYPE##_MAX - c) / 10)                                            \
+        return neg ? TYPE##_MIN : TYPE##_MAX;                                  \
+      r *= 10;                                                                 \
+      r += c;                                                                  \
+    }                                                                          \
+    return neg ? -r : r;                                                       \
+  }
+
+ATOI_DEF(atoi, int, INT)
+ATOI_DEF(atol, long, LONG)
+ATOI_DEF(atoll, long long, LLONG)
+
+#undef ATOI_DEF
 
 char *getenv(const char *name)
 {
@@ -189,4 +284,20 @@ size_t strlcat(char *dst, const char *src, size_t siz)
   *d = '\0';
 
   return (dlen + (s - src)); /* count does not include NUL */
+}
+
+void *aligned_alloc(size_t align, size_t size)
+{
+__ESBMC_HIDE:;
+  if(
+    !align || (align & (align - 1)) || /* alignment must be a power of 2 */
+    (size & (align - 1)) /* size must be a multiple of alignment */
+  )
+  {
+    errno = EINVAL;
+    return NULL;
+  }
+  void *r = malloc(size);
+  __ESBMC_assume(!((uintptr_t)r & (align - 1)));
+  return r;
 }

@@ -445,6 +445,7 @@ bool clang_c_convertert::get_var(const clang::VarDecl &vd, exprt &new_expr)
     }
   }
 
+  // Get id and name
   std::string id, name;
   get_decl_name(vd, name, id);
 
@@ -470,7 +471,11 @@ bool clang_c_convertert::get_var(const clang::VarDecl &vd, exprt &new_expr)
   symbol.file_local = (vd.getStorageClass() == clang::SC_Static) ||
                       (!vd.isExternallyVisible() && !vd.hasGlobalStorage());
 
-  if(symbol.static_lifetime && !symbol.is_extern && !vd.hasInit())
+  bool aggregate_value_init = is_aggregate_type(vd.getType());
+
+  if(
+    symbol.static_lifetime && !symbol.is_extern &&
+    (!vd.hasInit() || aggregate_value_init))
   {
     // Initialize with zero value, if the symbol has initial value,
     // it will be added later on in this method
@@ -520,11 +525,13 @@ bool clang_c_convertert::get_var(const clang::VarDecl &vd, exprt &new_expr)
 
     added_symbol = move_symbol_to_context(symbol);
     gen_typecast(ns, val, t);
-    added_symbol->value = val;
+    if(!aggregate_value_init)
+      added_symbol->value = val;
 
     code_declt decl(symbol_expr(*added_symbol));
     decl.location() = location_begin;
-    decl.operands().push_back(val);
+    if(!aggregate_value_init)
+      decl.operands().push_back(val);
 
     new_expr = decl;
   }
@@ -3440,4 +3447,9 @@ void clang_c_convertert::get_ref_to_struct_type(typet &type)
     struct_union_typet t = to_struct_union_type(type);
     type = symbol_typet(tag_prefix + t.tag().as_string());
   }
+}
+
+bool clang_c_convertert::is_aggregate_type(const clang::QualType &)
+{
+  return false;
 }
