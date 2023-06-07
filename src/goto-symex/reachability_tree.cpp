@@ -546,9 +546,9 @@ reachability_treet::get_next_formula()
 
     if(por)
     {
-      get_cur_state().calculate_mpor_constraints();
       if(get_cur_state().is_transition_blocked_by_mpor())
         break;
+      get_cur_state().calculate_mpor_constraints();
     }
 
     next_thread_id = decide_ileave_direction(get_cur_state());
