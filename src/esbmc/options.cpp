@@ -358,6 +358,9 @@ const struct group_opt_templ all_cmd_options[] = {
      {"interval-analysis-dump",
       NULL,
       "dump resulting intervals for the analysis"},
+     {"interval-analysis-csv-dump",
+      NULL,
+      "dump resulting intervals for the analysis (intervals.csv)"},
      {"interval-analysis-wrapped",
       NULL,
       "enable analysis using wrapped intervals (disables Integers)"},
@@ -418,7 +421,15 @@ const struct group_opt_templ all_cmd_options[] = {
     // At every ileave point ESBMC stops and asks the user what thread to
     // transition to. Useful again for trying to replicate a particular context
     // switch order, or quickly explore what's reachable.
-    {"interactive-ileaves", NULL, ""}}},
+    {"interactive-ileaves", NULL, ""},
+    {"add-false-assert",
+     NULL,
+     "insert a false assertion at the beginning of each function/branch and "
+     "the end of each function"},
+    {"make-assert-false", NULL, "convert every assertion to false"},
+    {"goto-coverage",
+     NULL,
+     "this activates --add-false-assert and --make-assert-false"}}},
   {"end", {{"", NULL, "end of options"}}},
   {"Hidden Options",
    {{"depth", boost::program_options::value<int>(), "instruction"},

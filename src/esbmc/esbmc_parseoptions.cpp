@@ -1675,6 +1675,18 @@ bool esbmc_parseoptionst::process_goto_program(
       value_set_analysis.update(goto_functions);
     }
 
+    if(cmdline.isset("goto-coverage") || cmdline.isset("make-assert-false"))
+    {
+      goto_coveraget tmp;
+      tmp.make_asserts_false(goto_functions);
+    }
+
+    if(cmdline.isset("goto-coverage") || cmdline.isset("add-false-assert"))
+    {
+      goto_coveraget tmp;
+      tmp.add_false_asserts(goto_functions);
+    }
+
     // show it?
     if(cmdline.isset("show-loops"))
     {
