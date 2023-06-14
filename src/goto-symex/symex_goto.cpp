@@ -373,7 +373,7 @@ void goto_symext::phi_function(const statet::goto_statet &goto_state)
       rhs = cur_state_rhs;
     else
     {
-      rhs = if2tc(type, tmp_guard.as_expr(), goto_state_rhs, cur_state_rhs);
+      rhs = if2tc(type, tmp_guard.as_expr(), cur_state_rhs, goto_state_rhs);
       simplify(rhs);
     }
 
