@@ -546,9 +546,13 @@ reachability_treet::get_next_formula()
 
     if(por)
     {
-      get_cur_state().calculate_mpor_constraints();
+      //calculate_mpor_constraints() calculates whether next transition taken in at active_thread can be scheduled,
+      //and the dependency chain (DC) information has been updated by current transition.
+      //In the paper DC records dependencies of the last transitions by threads at time step k,
+      //to determine if current transition in active_thread can be scheduled.
       if(get_cur_state().is_transition_blocked_by_mpor())
         break;
+      get_cur_state().calculate_mpor_constraints();
     }
 
     next_thread_id = decide_ileave_direction(get_cur_state());
@@ -558,7 +562,10 @@ reachability_treet::get_next_formula()
     switch_to_next_execution_state();
 
     if(get_cur_state().interleaving_unviable)
+    {
+      get_cur_state().clear_claims();
       break;
+    }
   }
 
   (*cur_state_it)->add_memory_leak_checks();
