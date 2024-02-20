@@ -778,7 +778,14 @@ smt_convt::resultt bmct::multi_property_check(
       std::shared_ptr<smt_convt>(create_solver("", ns, options));
     // Save current instance
     generate_smt_from_equation(runtime_solver, local_eq);
-
+    if (
+      options.get_bool_option("smt-formula-too") ||
+      options.get_bool_option("smt-formula-only"))
+    {
+      runtime_solver->dump_smt();
+      if (options.get_bool_option("smt-formula-only"))
+        return;
+    }
     log_status(
       "Solving claim '{}' with solver {}",
       claim.claim_msg,
