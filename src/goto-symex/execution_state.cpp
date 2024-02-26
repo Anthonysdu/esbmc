@@ -263,7 +263,7 @@ void execution_statet::symex_step(reachability_treet &art)
       // TODO: we should support verifying memory leaks in multi-threaded C programs.
       assume(gen_false_expr());
       end_thread();
-      interleaving_unviable = true;
+      owning_rt->force_stop = true;
     }
     else
     {
@@ -411,6 +411,9 @@ bool execution_statet::dfs_explore_thread(unsigned int tid)
 
 bool execution_statet::check_if_ileaves_blocked()
 {
+  if(owning_rt->force_stop)
+    return true;
+
   if (owning_rt->get_CS_bound() != -1 && CS_number >= owning_rt->get_CS_bound())
     return true;
 
