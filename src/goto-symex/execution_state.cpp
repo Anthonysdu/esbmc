@@ -261,7 +261,9 @@ void execution_statet::symex_step(reachability_treet &art)
       // We should end the main thread to avoid exploring further interleavings
       // TODO: once we support at_exit, we should check this code
       // TODO: we should support verifying memory leaks in multi-threaded C programs.
+      assume(gen_false_expr());
       end_thread();
+      interleaving_unviable = true;
     }
     else
     {
