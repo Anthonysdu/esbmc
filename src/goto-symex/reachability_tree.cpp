@@ -43,6 +43,7 @@ reachability_treet::reachability_treet(
   por = !options.get_bool_option("no-por");
   main_thread_ended = false;
   target_template = std::move(target);
+  force_stop = false;
 }
 
 void reachability_treet::setup_for_new_explore()

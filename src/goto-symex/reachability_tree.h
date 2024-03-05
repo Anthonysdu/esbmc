@@ -321,6 +321,8 @@ public:
   /** __ESBMC_main thread has ended */
   bool main_thread_ended;
 
+  bool force_stop;
+
 protected:
   /** Stack of execution states representing current interleaving.
    *  See reachability_treet algorithm for how this is used. Is initialized
