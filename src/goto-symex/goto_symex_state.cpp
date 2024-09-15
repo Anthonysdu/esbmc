@@ -94,6 +94,10 @@ bool goto_symex_statet::constant_propagation(const expr2tc &expr) const
     if (s.thename == "NULL")
       return true;
 
+    if (
+      s.thename.as_string().find("symex_dynamic::dynamic") != std::string::npos)
+      return true;
+
     // By propagation nondet symbols, we can achieve some speed up but the
     // counterexample will be missing a lot of information, so not really worth it
     if (s.thename.as_string().find("nondet$symex::nondet") != std::string::npos)
@@ -132,7 +136,17 @@ bool goto_symex_statet::constant_propagation(const expr2tc &expr) const
   // FIXME: actually benchmark this and look at timing results, it may be
   // important benchmarks (i.e. TACAS) work better with some propagation
   if (is_with2t(expr))
+  {
+    const with2t &with = to_with2t(expr);
+    if (
+      is_symbol2t(with.source_value) && constant_propagation(with.source_value))
+      return false;
+    if (is_struct_type(expr))
+    {
+      return true;
+    }
     return false;
+  }
 
   if (
     is_constant_struct2t(expr) || is_constant_union2t(expr) ||
